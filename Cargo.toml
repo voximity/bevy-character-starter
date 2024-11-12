@@ -1,0 +1,10 @@
+[package]
+name = "bevy-character-starter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.14.2"
+bevy-tnua = "0.20.0"
+bevy-tnua-rapier3d = "0.7.0"
+bevy_rapier3d = "0.27.0"
