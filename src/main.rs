@@ -4,7 +4,7 @@ use bevy::{
     color::palettes::css::LIME,
     input::mouse::MouseMotion,
     prelude::*,
-    window::{CursorGrabMode, PrimaryWindow},
+    window::{CursorGrabMode, PresentMode, PrimaryWindow},
 };
 use bevy_rapier3d::prelude::*;
 use bevy_tnua::prelude::{
@@ -12,26 +12,47 @@ use bevy_tnua::prelude::{
 };
 use bevy_tnua_rapier3d::{TnuaRapier3dIOBundle, TnuaRapier3dPlugin, TnuaRapier3dSensorShape};
 
+/// resource to control mouse locking
+#[derive(Resource)]
+struct MouseLocked(bool);
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                // optional: disable v-sync
+                present_mode: PresentMode::Immediate,
+                ..default()
+            }),
+            ..default()
+        }))
+        .insert_resource(MouseLocked(true))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugins(TnuaControllerPlugin::default())
         .add_plugins(TnuaRapier3dPlugin::default())
-        .add_systems(Startup, (setup_window, setup_scene, setup_player))
+        .add_systems(Startup, (setup_scene, setup_player))
         .add_systems(Update, (player_rotation, update_player).chain())
-        .add_systems(Update, window_close_listener)
+        .add_systems(Update, toggle_mouse_lock)
+        .add_systems(Update, mouse_lock)
         .run();
 }
 
 #[derive(Component)]
 struct Player;
 
-/// lock and hide cursor
-fn setup_window(mut window: Query<&mut Window, With<PrimaryWindow>>) {
-    let mut window = window.single_mut();
-    window.cursor.grab_mode = CursorGrabMode::Locked;
-    window.cursor.visible = false;
+#[derive(Component)]
+struct PlayerCamera(f32);
+
+/// lock/unlock mouse based on MouseLocked resource
+fn mouse_lock(locked: Res<MouseLocked>, mut window: Query<&mut Window, With<PrimaryWindow>>) {
+    if locked.is_changed() {
+        let mut window = window.single_mut();
+        (window.cursor.grab_mode, window.cursor.visible) = if locked.0 {
+            (CursorGrabMode::Confined, true)
+        } else {
+            (CursorGrabMode::None, false)
+        };
+    }
 }
 
 /// setup scene: a simple plane
@@ -48,6 +69,19 @@ fn setup_scene(
         })
         .insert(RigidBody::Fixed)
         .insert(Collider::cuboid(10.0, 0.1, 10.0));
+
+    // a light
+    commands.spawn(PointLightBundle {
+        point_light: PointLight {
+            shadows_enabled: true,
+            intensity: 10_000_000.0,
+            range: 100.0,
+            shadow_depth_bias: 0.2,
+            ..default()
+        },
+        transform: Transform::from_xyz(8.0, 16.0, 8.0),
+        ..default()
+    });
 }
 
 /// setup player entity (including child camera)
@@ -78,24 +112,26 @@ fn setup_player(
             ..default()
         })
         .with_children(|children| {
-            children.spawn(Camera3dBundle {
-                transform: Transform {
-                    translation: Vec3::new(0.0, 0.5, 0.0),
+            children
+                .spawn(Camera3dBundle {
+                    transform: Transform {
+                        translation: Vec3::new(0.0, 0.5, 0.0),
+                        ..default()
+                    },
+                    projection: Projection::Perspective(PerspectiveProjection {
+                        fov: PI * 0.5,
+                        ..default()
+                    }),
                     ..default()
-                },
-                projection: Projection::Perspective(PerspectiveProjection {
-                    fov: PI * 0.5,
-                    ..default()
-                }),
-                ..default()
-            });
+                })
+                .insert(PlayerCamera(0.0));
         });
 }
 
-// listen for escape key to close game
-fn window_close_listener(keyboard: Res<ButtonInput<KeyCode>>, mut exit: EventWriter<AppExit>) {
+/// listen for escape key to toggle mouse lock
+fn toggle_mouse_lock(keyboard: Res<ButtonInput<KeyCode>>, mut exit: ResMut<MouseLocked>) {
     if keyboard.just_pressed(KeyCode::Escape) {
-        exit.send(AppExit::Success);
+        exit.0 = !exit.0;
     }
 }
 
@@ -123,12 +159,14 @@ fn update_player(
     // transform direction to correspond to camera rotation
     direction = (transform.rotation * direction) * Vec3::new(1.0, 0.0, 1.0);
 
+    // set controller basis
     controller.basis(TnuaBuiltinWalk {
         desired_velocity: direction.normalize_or_zero() * 10.0,
         float_height: 1.5,
         ..default()
     });
 
+    // add jump action if we're holding space
     if keyboard.pressed(KeyCode::Space) {
         controller.action(TnuaBuiltinJump {
             height: 4.0,
@@ -140,13 +178,27 @@ fn update_player(
 
 /// rotate the player entity by mouse X, but the camera by mouse Y
 fn player_rotation(
+    locked: Res<MouseLocked>,
     mut er_motion: EventReader<MouseMotion>,
     mut player_transform: Query<&mut Transform, With<Player>>,
-    mut camera_transform: Query<&mut Transform, (With<Camera3d>, Without<Player>)>,
+    mut camera_transform: Query<
+        (&mut Transform, &mut PlayerCamera),
+        (With<Camera3d>, Without<Player>),
+    >,
 ) {
     const SENS: f32 = 0.005;
+
+    if !locked.0 {
+        return;
+    }
+
+    let mut player_transform = player_transform.single_mut();
+    let (mut camera_transform, mut player_camera) = camera_transform.single_mut();
+
     for ev in er_motion.read() {
-        player_transform.single_mut().rotate_y(-ev.delta.x * SENS);
-        camera_transform.single_mut().rotate_x(-ev.delta.y * SENS);
+        player_transform.rotate_y(-ev.delta.x * SENS);
+
+        player_camera.0 = (player_camera.0 - ev.delta.y * SENS).clamp(-PI / 2.0, PI / 2.0);
+        camera_transform.rotation = Quat::from_rotation_x(player_camera.0);
     }
 }
